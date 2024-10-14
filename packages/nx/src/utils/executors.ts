@@ -10,6 +10,9 @@ import { COMMANDS } from './commands';
 import { normalizeExtraFlags } from './normalize-extra-flags';
 import { parseOptionName } from './parse-option-name';
 import { ExecutorSchema } from './types';
+import { quoteString } from './helpers';
+
+const isWindows = process.platform === 'win32';
 
 export function commonExecutor(options: ExecutorSchema, context: ExecutorContext): Promise<{ success: boolean }> {
   // eslint-disable-next-line no-async-promise-executor
@@ -174,6 +177,11 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
             icon = '🥽';
           }
         }
+        if (isWindows) {
+          // https://github.com/NativeScript/nativescript-cli/pull/5808
+          nsOptions = nsOptions.map((arg) => quoteString(arg));
+          additionalArgs = additionalArgs.map((arg) => quoteString(arg));
+        }
         console.log(`―――――――――――――――――――――――― ${icon}`);
         console.log(`Running NativeScript ${isTest ? 'unit tests' : 'CLI'} within ${projectCwd}`);
         console.log(' ');
@@ -187,6 +195,7 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
         const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', [...nsOptions, ...additionalArgs], {
           cwd: projectCwd,
           stdio: 'inherit',
+          shell: isWindows ? true : undefined,
         });
         child.on('close', (code) => {
           console.log(`Done.`);
@@ -197,8 +206,13 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
 
       const checkAppId = function () {
         return new Promise((resolve) => {
-          const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', ['config', 'get', `id`], {
+          let args = ['config', 'get', `id`];
+          if (isWindows) {
+            args = args.map((arg) => quoteString(arg));
+          }
+          const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', args, {
             cwd: projectCwd,
+            shell: isWindows ? true : undefined,
           });
           child.stdout.setEncoding('utf8');
           child.stdout.on('data', function (data) {
@@ -219,9 +233,14 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
           checkAppId().then((id) => {
             if (options.id !== id) {
               // set custom app bundle id before running the app
-              const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', ['config', 'set', `${options.platform}.id`, options.id], {
+              let args = ['config', 'set', `${options.platform}.id`, options.id];
+              if (isWindows) {
+                args = args.map((arg) => quoteString(arg));
+              }
+              const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', args, {
                 cwd: projectCwd,
                 stdio: 'inherit',
+                shell: isWindows ? true : undefined,
               });
               child.on('close', (code) => {
                 child.kill('SIGKILL');
