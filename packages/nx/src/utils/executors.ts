@@ -1,22 +1,24 @@
-import { ExecutorContext, readProjectConfiguration } from '@nx/devkit';
-import * as childProcess from 'child_process';
-import { readFileSync, writeFileSync } from 'fs-extra';
+import { ExecutorContext } from '@nx/devkit';
+import childProcess from 'child_process';
 import * as enquirer from 'enquirer';
+import { XMLBuilder, XMLParser } from 'fast-xml-parser';
+import { readFileSync, writeFileSync } from 'fs-extra';
 import { resolve as nodeResolve } from 'path';
 import { build, parse } from 'plist';
-import { Builder, parseString } from 'xml2js';
+import { AndroidSchema } from '../schemas/android-properties.schema';
+import { Platform } from '../schemas/base.schema';
 import { mergeDeep } from '../schemas/deep-merge';
+import { IosSchema } from '../schemas/ios-properties.schema';
 import { COMMANDS } from './commands';
-import { normalizeExtraFlags } from './normalize-extra-flags';
-import { parseOptionName } from './parse-option-name';
 import { ExecutorSchema } from './types';
-import { quoteString } from './helpers';
-
-const isWindows = process.platform === 'win32';
 
 export function commonExecutor(options: ExecutorSchema, context: ExecutorContext): Promise<{ success: boolean }> {
+  // global vars
+  const isWindows = process.platform === 'win32';
+  let projectCwd: string;
+
   // eslint-disable-next-line no-async-promise-executor
-  return new Promise(async (resolve, reject) => {
+  return new Promise(async (resolve, reject): Promise<{ success: boolean }> => {
     try {
       const isBuild = options.command === COMMANDS.BUILD;
       const isClean = options.command === COMMANDS.CLEAN;
@@ -26,338 +28,285 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
       const isTest = options.command === COMMANDS.TEST;
       const isSilent = options.silent === true;
 
-      const platformCheck = [].concat(context.configurationName, options.platform, options?.['_']);
+      const platformCheck = [context.configurationName, options.platform].concat(options?.['_']);
       let isIos = platformCheck.some((overrides) => overrides === 'ios');
       let isAndroid = platformCheck.some((overrides) => overrides === 'android');
 
-      if (!isClean && !isSilent && !isIos && !isAndroid) {
-        const { platform } = <{ platform: string }>await enquirer.default.prompt({
-          type: 'select',
-          name: 'platform',
-          message: 'Which platform do you want to target?',
-          choices: [{ name: 'ios' }, { name: 'android' }],
-        });
+      if (!isAndroid && !isIos) {
+        const platform = await selectPlatform(options);
         isIos = platform === 'ios';
         isAndroid = platform === 'android';
       }
 
-      if (!isClean) {
-        if (isAndroid) {
-          options.platform = 'android';
-        } else if (isIos) {
-          options.platform = 'ios';
-        } else {
-          options.platform = 'ios';
-          console.warn('No platform was specified. Defaulting to iOS.');
-        }
-      }
+      options.platform = isAndroid ? 'android' : 'ios';
 
-      const projectConfig = context.workspace.projects[context.projectName];
-      const projectCwd = projectConfig.root;
+      const projectConfig = context.projectsConfigurations.projects[context.projectName];
+      projectCwd = projectConfig.root;
 
       const target = projectConfig.targets[options.command];
       const targetOptions = target.options;
       const targetPlatformOptions = targetOptions[options.platform];
-      const targetConfigurations = target.configurations;
-      let targetConfigurationName = context.configurationName;
       // const targetDescription = JSON.parse(process.argv.find((arg) => arg.indexOf('targetDescription') !== -1));
 
       // fix for nx overwriting android and ios sub properties
       mergeDeep(options, targetOptions);
 
-      if (!isClean && !isSilent && !targetConfigurationName && Object.keys(targetConfigurations || {}).length) {
-        const { configurationName } = <{ configurationName: string }>await enquirer.default.prompt({
-          type: 'select',
-          name: 'configurationName',
-          message: 'No configuration was provided. Did you mean to select one of these configurations?',
-          choices: ['No', ...Object.keys(targetConfigurations)],
-        });
-        if (configurationName == 'No') {
-          console.warn(`Continuing with no configuration. Specify with --configuration=prod, -c=prod, or :prod`);
-        } else {
-          targetConfigurationName = configurationName;
-        }
-      }
-
+      const configurationName = await selectConfiguration(target.configurations, context.configurationName);
       // fix for nx overwriting android and ios sub properties
-      if (targetConfigurationName) {
-        mergeDeep(options, targetConfigurations[targetConfigurationName]);
-      }
+      if (configurationName) mergeDeep(options, target.configurations[configurationName]);
 
-      const nsOptions = [];
-      nsOptions.push(options.command);
+      const nsOptions = prepareNsOptions(options, projectCwd);
+      const additionalArgs: string[] = []; // Assuming any extra flags are handled here
 
-      if (!isClean) {
-        options.platform && nsOptions.push(options.platform);
-        options.clean && nsOptions.push('--clean');
-        options.coverage && nsOptions.push('--env.codeCoverage');
-        options.device && !options.emulator && nsOptions.push(`--device=${options.device}`);
-        options.emulator && nsOptions.push('--emulator');
-        options.noHmr && nsOptions.push('--no-hmr');
-        options.timeout && options.timeout > -1 && nsOptions.push(`--timeout=${options.timeout}`);
-        options.uglify && nsOptions.push('--env.uglify');
-        options.verbose && nsOptions.push('--env.verbose');
-        options.production && nsOptions.push('--env.production');
-        options.forDevice && nsOptions.push('--for-device');
-        options.release && nsOptions.push('--release');
-        options.copyTo && nsOptions.push(`--copy-to=${options.copyTo}`);
-        options.force !== false && nsOptions.push('--force');
+      if (options.android?.xmlUpdates) updateXml(options.android.xmlUpdates, 'android');
+      if (options.ios?.plistUpdates) updateXml(options.ios.plistUpdates, 'android');
 
-        if (isAndroid && options.android) {
-          options.android.aab && nsOptions.push('--aab');
-          options.android.keyStorePath && nsOptions.push(`--key-store-path=${options.android.keyStorePath}`);
-          options.android.keyStorePassword && nsOptions.push(`--key-store-password=${options.android.keyStorePassword}`);
-          options.android.keyStoreAlias && nsOptions.push(`--key-store-alias=${options.android.keyStoreAlias}`);
-          options.android.keyStoreAliasPassword && nsOptions.push(`--key-store-alias-password=${options.android.keyStoreAliasPassword}`);
-        }
-        if (isIos && options.ios) {
-          options.ios.provision && nsOptions.push(`--provision=${options.ios.provision}`);
-        }
+      await checkOptions();
 
-        const nsCliFileReplacements: Array<string> = [];
-        if (targetConfigurationName) {
-          const configOptions = targetConfigurations[targetConfigurationName];
-          if (configOptions.combineWithConfig) {
-            const configParts = configOptions.combineWithConfig.split(':');
-            const combineWithTargetName = configParts[0];
-            let configName: string;
-            const combineWithTarget = projectConfig.targets[combineWithTargetName];
-            if (combineWithTarget && combineWithTarget.configurations) {
-              if (configParts.length > 1) {
-                configName = configParts[1];
-                const combineWithTargetConfig = combineWithTarget.configurations[configName];
-                // TODO: combine configOptions with combineWithConfigOptions
-                if (combineWithTargetConfig) {
-                  if (combineWithTargetConfig.fileReplacements) {
-                    for (const r of combineWithTargetConfig.fileReplacements) {
-                      nsCliFileReplacements.push(`${r.replace.replace(projectCwd, './')}:${r.with.replace(projectCwd, './')}`);
-                    }
-                  }
-                }
-              }
-            } else {
-              console.warn(`Warning: No configurations will be combined. A "${combineWithTargetName}" target${configName ? ' with configuration "' + configName + '"' : ''} was not found for project name: "${context.projectName}"`);
-            }
-          }
-        }
-        for (const r of options?.fileReplacements) {
-          nsCliFileReplacements.push(`${r.replace.replace(projectCwd, './')}:${r.with.replace(projectCwd, './')}`);
-        }
-        nsCliFileReplacements.length && nsOptions.push(`--env.replace="${nsCliFileReplacements.join(',')}"`);
-      }
-
-      // some options should never be duplicated
-      // const enforceSingularOptions = ['provision', 'device', 'copy-to'];
-
-      // additional cli flags
-      // const overrides = { ...targetDescription.overrides };
-      // // remove nx unparsed overrides
-      // for (const override of Object.keys(overrides)) {
-      //   if (override.indexOf('_') === 0) delete overrides[override];
-      // }
-      const additionalArgs = [];//normalizeExtraFlags(overrides);
-
-      // if (!isClean) {
-      //   for (const flag of additionalArgs) {
-      //     const optionName = parseOptionName(flag);
-      //     if (!nsOptions.includes(flag) && !additionalArgs.includes(flag) && !enforceSingularOptions.includes(optionName)) {
-      //       additionalArgs.push(flag);
-      //     }
-      //   }
-      // }
-
-      const runCommand = function () {
-        let icon = '';
-        if (!options.clean) {
-          if (options.platform === 'ios') {
-            icon = '';
-          } else if (options.platform === 'android') {
-            icon = '🤖';
-          } else if (['vision', 'visionos'].includes(options.platform)) {
-            icon = '🥽';
-          }
-        }
-        if (isWindows) {
-          // https://github.com/NativeScript/nativescript-cli/pull/5808
-          nsOptions = nsOptions.map((arg) => quoteString(arg));
-          additionalArgs = additionalArgs.map((arg) => quoteString(arg));
-        }
-        console.log(`―――――――――――――――――――――――― ${icon}`);
-        console.log(`Running NativeScript ${isTest ? 'unit tests' : 'CLI'} within ${projectCwd}`);
-        console.log(' ');
-        console.log([`ns`, ...nsOptions, ...additionalArgs].join(' '));
-        console.log(' ');
-        if (additionalArgs.length) {
-          console.log('Note: When using extra cli flags, ensure all key/value pairs are separated with =, for example: --provision="Name"');
-          console.log(' ');
-        }
-        console.log(`---`);
-        const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', [...nsOptions, ...additionalArgs], {
-          cwd: projectCwd,
-          stdio: 'inherit',
-          shell: isWindows ? true : undefined,
-        });
-        child.on('close', (code) => {
-          console.log(`Done.`);
-          child.kill('SIGKILL');
-          resolve({ success: code === 0 });
-        });
-      };
-
-      const checkAppId = function () {
-        return new Promise((resolve) => {
-          let args = ['config', 'get', `id`];
-          if (isWindows) {
-            args = args.map((arg) => quoteString(arg));
-          }
-          const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', args, {
-            cwd: projectCwd,
-            shell: isWindows ? true : undefined,
-          });
-          child.stdout.setEncoding('utf8');
-          child.stdout.on('data', function (data) {
-            // ensure no newline chars at the end
-            const appId = (data || '').toString().replace('\n', '').replace('\r', '');
-            // console.log('existing app id:', appId);
-            resolve(appId);
-          });
-          child.on('close', (code) => {
-            child.kill('SIGKILL');
-          });
-        });
-      };
-
-      const checkOptions = function () {
-        if (options.id) {
-          // only modify app id if doesn't match (modifying nativescript.config will cause full native build)
-          checkAppId().then((id) => {
-            if (options.id !== id) {
-              // set custom app bundle id before running the app
-              let args = ['config', 'set', `${options.platform}.id`, options.id];
-              if (isWindows) {
-                args = args.map((arg) => quoteString(arg));
-              }
-              const child = childProcess.spawn(/^win/.test(process.platform) ? 'ns.cmd' : 'ns', args, {
-                cwd: projectCwd,
-                stdio: 'inherit',
-                shell: isWindows ? true : undefined,
-              });
-              child.on('close', (code) => {
-                child.kill('SIGKILL');
-                runCommand();
-              });
-            } else {
-              runCommand();
-            }
-          });
-        } else {
-          runCommand();
-        }
-      };
-
-      if (options.clean) {
-        runCommand();
-      } else {
-        const plistKeys = Object.keys(options.ios?.plistUpdates || {});
-        if (plistKeys.length) {
-          for (const filepath of plistKeys) {
-            let plistPath: string;
-            if (filepath.indexOf('.') === 0) {
-              // resolve relative to project directory
-              plistPath = nodeResolve(projectCwd, filepath);
-            } else {
-              // default to locating in App_Resources
-              plistPath = nodeResolve(projectCwd, 'App_Resources', 'iOS', filepath);
-            }
-            const plistFile = parse(readFileSync(plistPath, 'utf8'));
-            const plistUpdates = options.ios.plistUpdates[filepath];
-            // check if updates are needed to avoid native build if not needed
-            let needsUpdate = false;
-            for (const key in plistUpdates) {
-              if (Array.isArray(plistUpdates[key])) {
-                try {
-                  // compare stringified
-                  const plistString = JSON.stringify(plistFile[key] || {});
-                  const plistUpdateString = JSON.stringify(plistUpdates[key]);
-                  if (plistString !== plistUpdateString) {
-                    plistFile[key] = plistUpdates[key];
-                    console.log(`Updating ${filepath}: ${key}=`, plistFile[key]);
-                    needsUpdate = true;
-                  }
-                } catch (err) {
-                  console.log(`plist file parse error:`, err);
-                }
-              } else if (plistFile[key] !== plistUpdates[key]) {
-                plistFile[key] = plistUpdates[key];
-                console.log(`Updating ${filepath}: ${key}=${plistFile[key]}`);
-                needsUpdate = true;
-              }
-            }
-            if (needsUpdate) {
-              writeFileSync(plistPath, build(plistFile));
-              console.log(`Updated: ${plistPath}`);
-            }
-          }
-        }
-
-        const xmlKeys = Object.keys(options.android?.xmlUpdates || {});
-        if (xmlKeys.length) {
-          for (const filepath of xmlKeys) {
-            let xmlPath: string;
-            if (filepath.indexOf('.') === 0) {
-              // resolve relative to project directory
-              xmlPath = nodeResolve(projectCwd, filepath);
-            } else {
-              // default to locating in App_Resources
-              xmlPath = nodeResolve(projectCwd, 'App_Resources', 'Android', filepath);
-            }
-            parseString(readFileSync(xmlPath, 'utf8'), (err, result) => {
-              if (err) {
-                throw err;
-              }
-              if (!result) {
-                result = {};
-              }
-              // console.log('BEFORE---');
-              // console.log(JSON.stringify(result, null, 2));
-
-              const xmlUpdates = options.android.xmlUpdates[filepath];
-              for (const key in xmlUpdates) {
-                result[key] = {};
-                for (const subKey in xmlUpdates[key]) {
-                  result[key][subKey] = [];
-                  for (let i = 0; i < xmlUpdates[key][subKey].length; i++) {
-                    const node = xmlUpdates[key][subKey][i];
-                    const attrName = Object.keys(node)[0];
-
-                    result[key][subKey].push({
-                      _: node[attrName],
-                      $: {
-                        name: attrName,
-                      },
-                    });
-                  }
-                }
-              }
-
-              // console.log('AFTER---');
-              // console.log(JSON.stringify(result, null, 2));
-
-              const builder = new Builder();
-              const xml = builder.buildObject(result);
-              writeFileSync(xmlPath, xml);
-              console.log(`Updated: ${xmlPath}`);
-
-              checkOptions();
-            });
-          }
-        } else {
-          checkOptions();
-        }
-      }
+      return runCommand(nsOptions, additionalArgs);
     } catch (err) {
       console.error(err);
       reject(err);
     }
   });
+
+  async function selectPlatform(options: ExecutorSchema): Promise<Platform> {
+    if (options.silent) {
+      if (!options.platform) {
+        console.warn('No platform was specified. Defaulting to iOS.');
+        return 'ios';
+      }
+      return options.platform;
+    }
+
+    if (!options.platform) {
+      const platformChoices: Platform[] = ['ios', 'android'];
+      const { platform } = await enquirer.prompt<{ platform: Platform }>({
+        type: 'select',
+        name: 'platform',
+        message: 'Which platform do you want to target?',
+        choices: platformChoices
+      });
+      return platform;
+    }
+    return options.platform;
+  }
+
+  async function selectConfiguration(targetConfigurations: any, configurationName: string) {
+    if (!configurationName && targetConfigurations && Object.keys(targetConfigurations).length) {
+      const { configurationName: selectedConfig } = await enquirer.prompt<{ configurationName: string }>({
+        type: 'select',
+        name: 'configurationName',
+        message: 'No configuration was provided. Did you mean to select one of these configurations?',
+        choices: ['No', ...Object.keys(targetConfigurations)]
+      });
+      if (selectedConfig == 'No') {
+        console.warn(`Continuing with no configuration. Specify with --configuration=prod, -c=prod, or :prod`);
+      }
+      return selectedConfig !== 'No' ? selectedConfig : undefined;
+    }
+    return configurationName;
+  }
+
+  function prepareNsOptions(options: ExecutorSchema, projectCwd: string) {
+    const nsOptions: string[] = [];
+    nsOptions.push(options.command);
+
+    // early exit for `ns clean`
+    if (options.command === COMMANDS.CLEAN) {
+      return nsOptions;
+    }
+
+    const platformOptions = options[options.platform];
+    if (platformOptions) {
+      if (options.platform === 'android') {
+        const androidPlatformOptions = platformOptions as AndroidSchema;
+        androidPlatformOptions.aab && nsOptions.push('--aab');
+        androidPlatformOptions.keyStorePath && nsOptions.push(`--key-store-path=${androidPlatformOptions.keyStorePath}`);
+        androidPlatformOptions.keyStorePassword && nsOptions.push(`--key-store-password=${androidPlatformOptions.keyStorePassword}`);
+        androidPlatformOptions.keyStoreAlias && nsOptions.push(`--key-store-alias=${androidPlatformOptions.keyStoreAlias}`);
+        androidPlatformOptions.keyStoreAliasPassword && nsOptions.push(`--key-store-alias-password=${androidPlatformOptions.keyStoreAliasPassword}`);
+      }
+      if (options.platform === 'ios') {
+        const iosPlatformOptions = platformOptions as IosSchema;
+        iosPlatformOptions.provision && nsOptions.push(`--provision=${iosPlatformOptions.provision}`);
+      }
+    }
+
+    // Append common options
+    options.platform && nsOptions.push(options.platform);
+    options.clean && nsOptions.push('--clean');
+    options.coverage && nsOptions.push('--env.codeCoverage');
+    options.device && !options.emulator && nsOptions.push(`--device=${options.device}`);
+    options.emulator && nsOptions.push('--emulator');
+    options.noHmr && nsOptions.push('--no-hmr');
+    options.timeout && options.timeout > -1 && nsOptions.push(`--timeout=${options.timeout}`);
+    options.uglify && nsOptions.push('--env.uglify');
+    options.verbose && nsOptions.push('--env.verbose');
+    options.production && nsOptions.push('--env.production');
+    options.forDevice && nsOptions.push('--for-device');
+    options.release && nsOptions.push('--release');
+    options.copyTo && nsOptions.push(`--copy-to=${options.copyTo}`);
+    options.force !== false && nsOptions.push('--force');
+
+    const nsFileReplacements: Array<string> = [];
+    for (const fr of options.fileReplacements) {
+      nsFileReplacements.push(`${fr.replace.replace(projectCwd, './')}:${fr.with.replace(projectCwd, './')}`);
+    }
+    nsFileReplacements.length && nsOptions.push(`--env.replace="${nsFileReplacements.join(',')}"`);
+
+    return nsOptions;
+  }
+
+  function updateXml(xmlUpdatesConfig: Record<string, any>, type: Platform) {
+    const xmlUpdatesKeys = Object.keys(xmlUpdatesConfig || {});
+    for (const filePathKeys of xmlUpdatesKeys) {
+      let xmlFilePath: string;
+      if (filePathKeys.indexOf('.') === 0) {
+        // resolve relative to project directory
+        xmlFilePath = nodeResolve(projectCwd, filePathKeys);
+      } else {
+        // default to locating in App_Resources
+        let defaultDir: string[];
+        if (type === 'ios') {
+          defaultDir = ['App_Resources', 'iOS'];
+        } else if (type === 'android') {
+          defaultDir = ['App_Resources', 'Android'];
+        }
+        xmlFilePath = nodeResolve(projectCwd, ...defaultDir, filePathKeys);
+      }
+
+      let xmlFileContent: any;
+      const fileContent = readFileSync(xmlFilePath, 'utf8');
+      const xmlUpdates = xmlUpdatesConfig[filePathKeys];
+
+      if (type === 'ios') {
+        xmlFileContent = parse(fileContent);
+      } else if (type === 'android') {
+        const parser = new XMLParser({
+          ignoreAttributes: false,
+          ignoreDeclaration: false,
+          ignorePiTags: false,
+          attributeNamePrefix: '',
+          allowBooleanAttributes: true
+        });
+        xmlFileContent = parser.parse(fileContent);
+      }
+
+      let needsUpdate = false;
+      const recursiveUpdate = function(target: any, updates: any): void {
+        for (const key in updates) {
+          if (typeof updates[key] === 'object' && !Array.isArray(updates[key])) {
+            if (!target[key]) {
+              target[key] = {};
+            }
+            recursiveUpdate(target[key], updates[key]);
+          } else {
+            if (Array.isArray(target[key])) {
+              recursiveUpdate(target[key], updates[key]);
+            } else {
+              target[key] = updates[key];
+              needsUpdate = true;
+            }
+          }
+        }
+      };
+      recursiveUpdate(xmlFileContent, xmlUpdates);
+
+      if (needsUpdate) {
+        let newXmlFileContent;
+        if (type === 'ios') {
+          newXmlFileContent = build(xmlFileContent, { pretty: true, indent: '\t' });
+        } else {
+          const builder = new XMLBuilder({
+            ignoreAttributes: false,
+            format: true,
+            suppressEmptyNode: true,
+            attributeNamePrefix: '',
+            suppressBooleanAttributes: false
+          });
+          newXmlFileContent = builder.build(xmlFileContent);
+        }
+        writeFileSync(xmlFilePath, newXmlFileContent);
+        console.log(`Updated: ${xmlFilePath}`);
+      }
+    }
+  }
+
+  function checkOptions() {
+    return async () => {
+      if (!options.id) return;
+      const id = await checkAppId();
+      if (options.id !== id) {
+        return new Promise<void>((resolve) => {
+          const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', ['config', 'set', `${options.platform}.id`, options.id], {
+            cwd: projectCwd,
+            stdio: 'inherit',
+            shell: isWindows ? true : undefined
+          });
+          child.on('close', (code) => {
+            child.kill('SIGKILL');
+            resolve();
+          });
+        });
+      }
+    };
+  }
+
+  function checkAppId(): Promise<string> {
+    return new Promise((resolve) => {
+      const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', ['config', 'get', `id`], {
+        cwd: projectCwd,
+        shell: isWindows ? true : undefined
+      });
+
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', function(data) {
+        // ensure no newline chars at the end
+        const appId: string = (data || '').toString().replace('\n', '').replace('\r', '');
+        // console.log('existing app id:', appId);
+        resolve(appId);
+      });
+      child.on('close', (code) => {
+        child.kill('SIGKILL');
+      });
+    });
+  }
+
+  function runCommand(nsOptions: any, additionalArgs: string[]): Promise<{ success: boolean }> {
+    let icon = '';
+    if (!nsOptions.clean) {
+      if (nsOptions.platform === 'ios') {
+        icon = '';
+      } else if (nsOptions.platform === 'android') {
+        icon = '🤖';
+      } else if (['vision', 'visionos'].includes(nsOptions.platform)) {
+        icon = '🥽';
+      }
+    }
+
+    console.log(`―――――――――――――――――――――――― ${icon}`);
+    console.log(`Running NativeScript ${options.command === COMMANDS.TEST ? 'unit tests' : 'CLI'} in ${projectCwd}`);
+    console.log(' ');
+    console.log([`ns`, ...nsOptions, ...additionalArgs].join(' '));
+    console.log(' ');
+
+    if (additionalArgs.length) {
+      console.log('Note: When using extra cli flags, ensure all key/value pairs are separated with =, for example: --provision="Name"');
+      console.log(' ');
+    }
+    console.log(`---`);
+
+    const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', [...nsOptions, ...additionalArgs], {
+      cwd: projectCwd,
+      stdio: 'inherit',
+      shell: isWindows ? true : undefined
+    });
+
+    return new Promise((resolve) => {
+      child.on('close', (code) => {
+        resolve({ success: code === 0 });
+      });
+    });
+  }
 }

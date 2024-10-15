@@ -28,6 +28,7 @@
     "migrations": "./migrations.json"
   },
   "dependencies": {
+    "fast-xml-parser": "^4.5.0",
     "fs-extra": "^11.2.0",
     "ignore": "^5.3.0",
     "plist": "^3.1.0",
@@ -35,7 +36,10 @@
   },
   "peerDependencies": {
     "@nx/devkit": ">=19.0.0 <20.0.0",
-    "@nx/js": ">=19.0.0 <20.0.0",
-    "@nx/jest": ">=19.0.0 <20.0.0"
+    "@nx/jest": ">=19.0.0 <20.0.0",
+    "@nx/js": ">=19.0.0 <20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5"
   }
 }
