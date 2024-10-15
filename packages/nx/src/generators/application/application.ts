@@ -117,7 +117,7 @@ export async function applicationGenerator(tree: Tree, options: Schema) {
         options: {},
       },
       lint: {
-        executor: '@nrwl/linter:eslint',
+        executor: '@nx/linter:eslint',
         options: {
           lintFilePatterns: [`${appPath}/**/*.ts`, `${appPath}/src/**/*.html`],
         },

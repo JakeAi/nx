@@ -297,7 +297,7 @@ export namespace PluginHelpers {
 
       if (packagesToRun.length) {
         for (const packageName of packagesToRun) {
-          const nxPlatform = <PlatformTypes>packageName.replace('@nrwl/', '');
+          const nxPlatform = <PlatformTypes>packageName.replace('@nx/', '');
           const { name, directory } = getAppNamingConvention(options, nxPlatform);
 
           externalChains.push((tree: Tree, options) => {
@@ -331,7 +331,7 @@ export namespace PluginHelpers {
           // // console.log('devDependencies:', devDependencies);
           // // console.log('packagesToRunXplat:', packagesToRunXplat);
           // for (const packageName of packagesToRun) {
-          //   const nxPlatform = <PlatformTypes>packageName.replace('@nrwl/', '');
+          //   const nxPlatform = <PlatformTypes>packageName.replace('@nx/', '');
           //   const { name, directory } = getAppNamingConvention(options, nxPlatform);
           //   context.addTask(
           //     new RunSchematicTask(packageName, generator, {

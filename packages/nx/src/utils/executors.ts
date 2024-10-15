@@ -63,7 +63,7 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
 
       await checkOptions();
 
-      return runCommand(nsOptions, additionalArgs);
+      return await runCommand(nsOptions, additionalArgs);
     } catch (err) {
       console.error(err);
       reject(err);
