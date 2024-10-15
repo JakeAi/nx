@@ -41,7 +41,7 @@ export const androidSchema = {
       xmlUpdates: {
         type: 'object',
         description:
-          "Update any .xml value. Specify name of any filename with key/value pairs, e.g. { 'src/main/res/values/strings.xml': { manifest: { 'uses-permission': [ { '#text': 'My-App', 'name': 'app_name' },{ '#text': 'My-App', 'name': 'title_activity_kimera' } ] } } }. Defaults to look in App_Resources/Android/{filepath} however you can specify relative path if located elsewhere.",
+          "Update any .xml value. Specify name of any filename with key/value pairs, e.g. { 'src/main/res/values/strings.xml': { resources: { 'string': [ { '#text': 'My-App', 'name': 'app_name' },{ '#text': 'My-App', 'name': 'title_activity_kimera' } ] } } }. Defaults to look in App_Resources/Android/{filepath} however you can specify relative path if located elsewhere.",
       },
     },
   },
