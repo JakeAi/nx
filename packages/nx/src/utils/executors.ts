@@ -1,14 +1,12 @@
 import { ExecutorContext } from '@nx/devkit';
 import childProcess from 'child_process';
-import * as enquirer from 'enquirer';
+import { prompt } from 'enquirer';
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { readFileSync, writeFileSync } from 'fs-extra';
 import { resolve as nodeResolve } from 'path';
 import { build, parse } from 'plist';
-import { AndroidSchema } from '../schemas/android-properties.schema';
 import { Platform } from '../schemas/base.schema';
 import { mergeDeep } from '../schemas/deep-merge';
-import { IosSchema } from '../schemas/ios-properties.schema';
 import { COMMANDS } from './commands';
 import { ExecutorSchema } from './types';
 
@@ -71,30 +69,27 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
   });
 
   async function selectPlatform(options: ExecutorSchema): Promise<Platform> {
+    if (options.platform) return options.platform;
+
     if (options.silent) {
-      if (!options.platform) {
-        console.warn('No platform was specified. Defaulting to iOS.');
-        return 'ios';
-      }
-      return options.platform;
+      console.warn('No platform was specified. Defaulting to iOS.');
+      return 'ios';
     }
 
-    if (!options.platform) {
-      const platformChoices: Platform[] = ['ios', 'android'];
-      const { platform } = await enquirer.prompt<{ platform: Platform }>({
-        type: 'select',
-        name: 'platform',
-        message: 'Which platform do you want to target?',
-        choices: platformChoices
-      });
-      return platform;
-    }
-    return options.platform;
+    const platformChoices: Platform[] = ['ios', 'android'];
+    const { platform } = await prompt<{ platform: Platform }>({
+      type: 'select',
+      name: 'platform',
+      message: 'Which platform do you want to target?',
+      choices: platformChoices
+    });
+    return platform;
+
   }
 
   async function selectConfiguration(targetConfigurations: any, configurationName: string) {
     if (!configurationName && targetConfigurations && Object.keys(targetConfigurations).length) {
-      const { configurationName: selectedConfig } = await enquirer.prompt<{ configurationName: string }>({
+      const { configurationName: selectedConfig } = await prompt<{ configurationName: string }>({
         type: 'select',
         name: 'configurationName',
         message: 'No configuration was provided. Did you mean to select one of these configurations?',
@@ -113,25 +108,20 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
     nsOptions.push(options.command);
 
     // early exit for `ns clean`
-    if (options.command === COMMANDS.CLEAN) {
-      return nsOptions;
+    if (options.command === COMMANDS.CLEAN) return nsOptions;
+
+    if (options.platform === 'android' && options.android) {
+      options.android.aab && nsOptions.push('--aab');
+      options.android.keyStorePath && nsOptions.push(`--key-store-path=${options.android.keyStorePath}`);
+      options.android.keyStorePassword && nsOptions.push(`--key-store-password=${options.android.keyStorePassword}`);
+      options.android.keyStoreAlias && nsOptions.push(`--key-store-alias=${options.android.keyStoreAlias}`);
+      options.android.keyStoreAliasPassword && nsOptions.push(`--key-store-alias-password=${options.android.keyStoreAliasPassword}`);
     }
 
-    const platformOptions = options[options.platform];
-    if (platformOptions) {
-      if (options.platform === 'android') {
-        const androidPlatformOptions = platformOptions as AndroidSchema;
-        androidPlatformOptions.aab && nsOptions.push('--aab');
-        androidPlatformOptions.keyStorePath && nsOptions.push(`--key-store-path=${androidPlatformOptions.keyStorePath}`);
-        androidPlatformOptions.keyStorePassword && nsOptions.push(`--key-store-password=${androidPlatformOptions.keyStorePassword}`);
-        androidPlatformOptions.keyStoreAlias && nsOptions.push(`--key-store-alias=${androidPlatformOptions.keyStoreAlias}`);
-        androidPlatformOptions.keyStoreAliasPassword && nsOptions.push(`--key-store-alias-password=${androidPlatformOptions.keyStoreAliasPassword}`);
-      }
-      if (options.platform === 'ios') {
-        const iosPlatformOptions = platformOptions as IosSchema;
-        iosPlatformOptions.provision && nsOptions.push(`--provision=${iosPlatformOptions.provision}`);
-      }
+    if (options.platform === 'ios' && options.ios) {
+      options.ios.provision && nsOptions.push(`--provision=${options.ios.provision}`);
     }
+
 
     // Append common options
     options.platform && nsOptions.push(options.platform);
@@ -150,8 +140,8 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
     options.force !== false && nsOptions.push('--force');
 
     const nsFileReplacements: Array<string> = [];
-    for (const fr of options.fileReplacements) {
-      nsFileReplacements.push(`${fr.replace.replace(projectCwd, './')}:${fr.with.replace(projectCwd, './')}`);
+    for (const fileReplacement of options.fileReplacements) {
+      nsFileReplacements.push(`${fileReplacement.replace.replace(projectCwd, './')}:${fileReplacement.with.replace(projectCwd, './')}`);
     }
     nsFileReplacements.length && nsOptions.push(`--env.replace="${nsFileReplacements.join(',')}"`);
 
@@ -194,6 +184,7 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
       }
 
       let needsUpdate = false;
+
       const recursiveUpdate = function(target: any, updates: any): void {
         for (const key in updates) {
           if (typeof updates[key] === 'object' && !Array.isArray(updates[key])) {
@@ -217,7 +208,7 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
         let newXmlFileContent;
         if (type === 'ios') {
           newXmlFileContent = build(xmlFileContent, { pretty: true, indent: '\t' });
-        } else {
+        } else if (type === 'android') {
           const builder = new XMLBuilder({
             ignoreAttributes: false,
             format: true,
@@ -233,24 +224,23 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
     }
   }
 
-  function checkOptions() {
-    return async () => {
-      if (!options.id) return;
-      const id = await checkAppId();
-      if (options.id !== id) {
-        return new Promise<void>((resolve) => {
-          const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', ['config', 'set', `${options.platform}.id`, options.id], {
-            cwd: projectCwd,
-            stdio: 'inherit',
-            shell: isWindows ? true : undefined
-          });
-          child.on('close', (code) => {
-            child.kill('SIGKILL');
-            resolve();
-          });
+  async function checkOptions() {
+    if (!options.id) return;
+    const id = await checkAppId();
+    if (options.id !== id) {
+
+      return new Promise<void>((resolve) => {
+        const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', ['config', 'set', `${options.platform}.id`, options.id], {
+          cwd: projectCwd,
+          stdio: 'inherit',
+          shell: isWindows ? true : undefined
         });
-      }
-    };
+        child.on('close', (code) => {
+          child.kill('SIGKILL');
+          resolve();
+        });
+      });
+    }
   }
 
   function checkAppId(): Promise<string> {
@@ -259,7 +249,6 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
         cwd: projectCwd,
         shell: isWindows ? true : undefined
       });
-
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', function(data) {
         // ensure no newline chars at the end
@@ -297,13 +286,13 @@ export function commonExecutor(options: ExecutorSchema, context: ExecutorContext
     }
     console.log(`---`);
 
-    const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', [...nsOptions, ...additionalArgs], {
-      cwd: projectCwd,
-      stdio: 'inherit',
-      shell: isWindows ? true : undefined
-    });
-
     return new Promise((resolve) => {
+      const child = childProcess.spawn(isWindows ? 'ns.cmd' : 'ns', [...nsOptions, ...additionalArgs], {
+        cwd: projectCwd,
+        stdio: 'inherit',
+        shell: isWindows ? true : undefined
+      });
+
       child.on('close', (code) => {
         resolve({ success: code === 0 });
       });
